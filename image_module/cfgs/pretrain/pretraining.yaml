@@ -31,24 +31,23 @@ loss_on_unmasked: False
 
 
 # Wandb logging
-log_wandb: False # Set to True to log to Weights & Biases
+log_wandb: False
 wandb_project: 'pretrain'
-wandb_entity: '' # Change if needed
+wandb_entity: ''
 wandb_run_name: pretraining
 
 
 num_encoded_tokens: 225
 decoder_use_task_queries: True
-decoder_use_xattn: False
+decoder_use_xattn: True
 
 
 decoder_dim: 256
 decoder_depth: 2
 decoder_num_heads: 8
 
-# no use
-alphas: 1.0  # Dirichlet concentration parameter
+
+alphas: 1.0
 sample_tasks_uniformly: False
 fp32_output_adapters: ''
 standardize_depth: False
-imagenet_default_mean_and_std: True

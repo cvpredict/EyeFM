@@ -25,59 +25,19 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import yaml
-# from einops import rearrange
 
 import utils
-# import utils.data_constants as data_constants
 from multimae import multimae
 from multimae.criterion import (MaskedCrossEntropyLoss, MaskedL1Loss,
                                 MaskedMSELoss)
 from multimae.input_adapters import PatchedInputAdapter
 from multimae.output_adapters import SpatialOutputAdapter
-# from utils import NativeScalerWithGradNormCount as NativeScaler
+from utils import NativeScalerWithGradNormCount as NativeScaler
 from utils import create_model
-from utils.datasets import build_multimae_pretraining_dataset
+from utils.datasets import build_pretraining_dataset
 from utils.optim_factory import create_optimizer
 from utils.task_balancing import (NoWeightingStrategy,
                                   UncertaintyWeightingStrategy)
-
-DOMAIN_CONF = {
-    'cfp': {
-        'channels': 3,
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-        'output_adapter': partial(SpatialOutputAdapter, num_channels=3),
-        'loss': MaskedMSELoss,
-    },
-    'eyephoto': {
-        'channels': 3,
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-        'output_adapter': partial(SpatialOutputAdapter, num_channels=3),
-        'loss': MaskedMSELoss,
-    },
-    'uwf': {
-        'channels': 3,
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-        'output_adapter': partial(SpatialOutputAdapter, num_channels=3),
-        'loss': MaskedMSELoss,
-    },
-    'oct': {
-        'channels': 3,
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-        'output_adapter': partial(SpatialOutputAdapter, num_channels=3),
-        'loss': MaskedMSELoss,
-    },
-    'ffa': {
-        'channels': 3,
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-        'output_adapter': partial(SpatialOutputAdapter, num_channels=3),
-        'loss': MaskedMSELoss,
-    },
-}
 
 
 def get_args():
@@ -241,6 +201,13 @@ def get_args():
 
     return parser
 
+DOMAIN_CONF = {
+    'channels': 3,
+    'stride_level': 1,
+    'input_adapter': partial(PatchedInputAdapter, num_channels=3),
+    'output_adapter': partial(SpatialOutputAdapter, num_channels=3),
+    'loss': MaskedMSELoss,
+}
 
 def get_model(args):
     """Creates and returns model from arguments
@@ -248,16 +215,16 @@ def get_model(args):
     print(f"Creating model: {args.model} for inputs {args.in_domains} and outputs {args.out_domains}")
 
     input_adapters = {
-        domain: DOMAIN_CONF[domain]['input_adapter'](
-            stride_level=DOMAIN_CONF[domain]['stride_level'],
+        domain: DOMAIN_CONF['input_adapter'](
+            stride_level=DOMAIN_CONF['stride_level'],
             patch_size_full=args.patch_size,
         )
         for domain in args.in_domains
     }
 
     output_adapters = {
-        domain: DOMAIN_CONF[domain]['output_adapter'](
-            stride_level=DOMAIN_CONF[domain]['stride_level'],
+        domain: DOMAIN_CONF['output_adapter'](
+            stride_level=DOMAIN_CONF['stride_level'],
             patch_size_full=args.patch_size,
             dim_tokens=args.decoder_dim,
             depth=args.decoder_depth,
@@ -279,6 +246,7 @@ def get_model(args):
     )
 
     return model
+
 
 def main(args):
     utils.init_distributed_mode(args)
@@ -309,14 +277,14 @@ def main(args):
     print("norm_pix_loss:", args.extra_norm_pix_loss)
 
     tasks_loss_fn = {
-        domain: DOMAIN_CONF[domain]['loss'](patch_size=args.patch_size, stride=DOMAIN_CONF[domain]['stride_level'],
+        domain: DOMAIN_CONF['loss'](patch_size=args.patch_size, stride=DOMAIN_CONF['stride_level'],
                                             norm_pix=args.extra_norm_pix_loss)
         for domain in args.out_domains
     }
 
     # Get dataset
     print("Building dataset_train.")
-    dataset_train = build_multimae_pretraining_dataset(args)
+    dataset_train = build_pretraining_dataset(args)
     print("Finish building dataset_train.")
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
@@ -327,7 +295,6 @@ def main(args):
 
         sampler_rank = global_rank
         num_training_steps_per_epoch = len(dataset_train) // args.batch_size // num_tasks
-        # qianbo, remove drop_last
         sampler_train = torch.utils.data.DistributedSampler(
             dataset_train, num_replicas=num_tasks, rank=sampler_rank, shuffle=True
         )

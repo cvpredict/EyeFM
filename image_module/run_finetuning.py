@@ -1,13 +1,9 @@
 import argparse
 import datetime
 import json
-# import math
-import ast
 import os
 import time
 from functools import partial
-from pathlib import Path
-import pandas as pd
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
@@ -18,46 +14,22 @@ from multimae.output_adapters import LinearOutputAdapter
 from utils import NativeScalerWithGradNormCount as NativeScaler
 from utils import create_model
 from utils.pos_embed import interpolate_pos_embed_multimae
-from utils.datasets_multi_cls import build_dataset
+from utils.datasets_finetune import build_dataset
 from utils import LabelSmoothingCrossEntropy, Mixup, ModelEma, SoftTargetCrossEntropy
-from torch.utils.tensorboard import SummaryWriter
 from timm.models.layers import trunc_normal_
 import utils.lr_decay as lrd
 from engine_finetune import train_one_epoch, evaluate
 import utils.misc as misc
-from significance import mean_std
-
-
 import warnings
 warnings.filterwarnings("ignore")
 
 
-DOMAIN_CONF = {
-    'cfp': {
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-    },
-    'eyephoto': {
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-    },
-    'uwf': {
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-    },
-    'oct': {
-        'stride_level': 1,
-        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
-    },
-}
-
-
 def get_args():
-    config_parser = parser = argparse.ArgumentParser(description='MultiMAE Finetune script', add_help=False)
+    config_parser = parser = argparse.ArgumentParser(description='Finetune script', add_help=False)
     parser.add_argument('-c', '--config', default='cfgs/finetune/finetune.yaml', type=str, metavar='FILE',
                         help='YAML config file specifying default arguments')
 
-    parser = argparse.ArgumentParser('MultiMAE fine-tuning script', add_help=False)
+    parser = argparse.ArgumentParser('fine-tuning script', add_help=False)
     parser.add_argument('--batch_size', default=64, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=50, type=int)
@@ -66,7 +38,7 @@ def get_args():
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
 
     # Model parameters
-    parser.add_argument('--model', default='multivit_base', type=str, metavar='MODEL',
+    parser.add_argument('--model', default='multivit_large', type=str, metavar='MODEL',
                         help='Name of model to train')
 
     parser.add_argument('--input_size', default=224, type=int,
@@ -97,14 +69,9 @@ def get_args():
     # Augmentation parameters
     parser.add_argument('--color_jitter', type=float, default=None, metavar='PCT',
                         help='Color jitter factor (enabled only when not using Auto/RandAug)')
-    parser.add_argument('--aa', type=str, default='rand-m5-mstd0.5-inc1', metavar='NAME',
-                        help='Use AutoAugment policy. "v0" or "original". " + "(default: rand-m9-mstd0.5-inc1), new: rand-m5-mstd0.5-inc1'),
+    parser.add_argument('--aa', type=str, default='rand-m5-mstd0.5-inc1', metavar='NAME'),
     parser.add_argument('--smoothing', type=float, default=0.1,
                         help='Label smoothing (default: 0.1)')
-
-    parser.add_argument('--scale', type=str, default='None', help='New: (0.6, 1.0), old: None')
-    parser.add_argument('--vflip', type=float, default=0., help='New: 0.5, old: 0.')
-    parser.add_argument('--hflip', type=float, default=0.5, help='New: 0.5, old: 0.5')
 
     # * Random Erase params
     parser.add_argument('--reprob', type=float, default=0., metavar='PCT',
@@ -159,30 +126,19 @@ def get_args():
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
-
     # Task parameters
     parser.add_argument('--in_domains', default='cfp', type=str,
                         help='Input domain names, separated by hyphen')
     # Model parameters
-    # parser.add_argument('--num_global_tokens', default=1, type=int,
-    #                     help='number of global tokens to add to encoder')
+    parser.add_argument('--num_global_tokens', default=1, type=int,
+                        help='number of global tokens to add to encoder')
 
     # Finetuning parameters
     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
-    parser.add_argument('--eyenet', type=str, default='')
     parser.add_argument('--label_column', default='', type=str)
 
     parser.add_argument('--auto_resume', action='store_true')
     parser.set_defaults(auto_resume=True)
-    parser.add_argument('--nowtime', default=datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S'), type=str)
-
-    parser.add_argument('--test', action='store_true', help='Perform testing only')
-
-    # # Wandb logging
-    parser.add_argument('--log_wandb', default=False, action='store_true',
-                        help='log training and validation metrics to wandb')
-    parser.add_argument('--wandb_project', default=None, type=str,
-                        help='log training and validation metrics to wandb')
 
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
@@ -199,11 +155,11 @@ def get_args():
 
 
 def main(args):
+
     utils.init_distributed_mode(args)
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
-
     device = torch.device(args.device)
 
     seed = args.seed + utils.get_rank()
@@ -216,10 +172,7 @@ def main(args):
 
     dataset_train = build_dataset(is_train='train', args=args)
     dataset_val = build_dataset(is_train='val', args=args)
-    if args.having_test_set:
-        dataset_test = build_dataset(is_train='test', args=args)
-    else:
-        dataset_test = None
+    dataset_test = build_dataset(is_train='test', args=args)
 
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
@@ -239,24 +192,15 @@ def main(args):
         else:
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
-        if args.having_test_set:
-            if args.dist_eval:
-                if len(dataset_test) % num_tasks != 0:
-                    print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-                          'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                          'equal num of samples per-process.')
-                sampler_test = torch.utils.data.DistributedSampler(
-                    dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=True)
-            else:
-                sampler_test = torch.utils.data.SequentialSampler(dataset_test)
-
-    if global_rank == 0 and args.log_tensorboard:
-        # os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = SummaryWriter(log_dir=args.output_dir)
-    elif global_rank == 0 and args.log_wandb:
-        log_writer = utils.WandbLogger(args)
-    else:
-        log_writer = None
+        if args.dist_eval:
+            if len(dataset_test) % num_tasks != 0:
+                print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
+                      'This will slightly alter validation results as extra duplicate entries are added to achieve '
+                      'equal num of samples per-process.')
+            sampler_test = torch.utils.data.DistributedSampler(
+                dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=True)
+        else:
+            sampler_test = torch.utils.data.SequentialSampler(dataset_test)
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
@@ -273,14 +217,13 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=False
     )
-    if args.having_test_set:
-        data_loader_test = torch.utils.data.DataLoader(
-            dataset_test, sampler=sampler_test,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=False
-        )
+    data_loader_test = torch.utils.data.DataLoader(
+        dataset_test, sampler=sampler_test,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False
+    )
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
@@ -291,9 +234,13 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
+    DOMAIN_CONF = {
+        'input_adapter': partial(PatchedInputAdapter, num_channels=3),
+    }
+
     input_adapters = {
-        domain: DOMAIN_CONF[domain]['input_adapter'](
-            stride_level=DOMAIN_CONF[domain]['stride_level'],
+        domain: DOMAIN_CONF['input_adapter'](
+            stride_level=1,
             patch_size_full=args.patch_size,
             image_size=args.input_size,
             sincos_pos_emb=False,
@@ -314,8 +261,6 @@ def main(args):
         input_adapters=input_adapters,
         output_adapters=output_adapters,
         num_global_tokens=args.num_global_tokens,
-        # drop_rate=args.drop,
-        # attn_drop_rate=args.attn_drop_rate,
         drop_path_rate=args.drop_path,
     )
 
@@ -354,7 +299,7 @@ def main(args):
 
     eff_batch_size = args.batch_size * args.accum_iter * utils.get_world_size()
 
-    num_training_steps_per_epoch = len(dataset_train) // eff_batch_size
+    # num_training_steps_per_epoch = len(dataset_train) // eff_batch_size
 
     if args.lr is None:
         args.lr = args.blr * eff_batch_size / 256
@@ -395,23 +340,15 @@ def main(args):
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    # max_accuracy = 0.0
     max_auc = 0.0
-    best_val_epoch = 0
-    metrics_val_list = []
-    metrics_test_list = []
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
-
-        if log_writer is not None and args.log_wandb:
-            log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
 
         train_stats = train_one_epoch(
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, mixup_fn,
-            log_writer=log_writer,
             args=args
         )
         val_stats, val_metric = evaluate(data_loader_val, model, device, args.output_dir, epoch, mode='val',
@@ -424,38 +361,17 @@ def main(args):
                     loss_scaler=loss_scaler, epoch=epoch)
                 print(f"\nThe current best model is epoch {epoch}.\n")
 
-        if args.traintest:
+        if epoch == (args.epochs - 1):
             test_stats, test_metric = evaluate(data_loader_test, model, device, args.output_dir, epoch, mode='test',
                                            num_class=args.nb_classes, args=args)
 
-        if log_writer is not None and args.log_tensorboard:
-            log_writer.add_scalar('perf/val_auc', val_metric['AUROC'], epoch)
-            log_writer.add_scalar('perf/val_loss', val_stats['loss'], epoch)
-
         log_stats = {
             **{f'train_{k}': v for k, v in train_stats.items()},
-            'epoch': epoch,
-            'n_parameters': n_parameters}
-
-        if log_writer is not None and args.log_tensorboard:
-            log_writer.update(log_stats)
+            'epoch': epoch, 'n_parameters': n_parameters}
 
         if args.output_dir and misc.is_main_process():
-            if log_writer is not None and args.log_tensorboard:
-                log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
-
-        if log_writer is not None and args.log_wandb:
-            log_metric = {'epoch': epoch, 'n_parameters': n_parameters}
-            log_metric.update(**{f'val_{k}': v for k, v in val_metric.items()})
-            if args.traintest:
-                log_metric.update(**{f'test_{k}': v for k, v in test_metric.items()})
-            log_writer.update(log_metric)
-
-        metrics_val_list.append(val_metric)
-        if args.traintest:
-            metrics_test_list.append(test_metric)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -465,5 +381,3 @@ def main(args):
 if __name__ == '__main__':
     opts = get_args()
     main(opts)
-
-

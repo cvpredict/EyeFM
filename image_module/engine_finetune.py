@@ -1,13 +1,12 @@
 import math
 import sys
-import csv
 import os
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.data import Mixup
-from timm.utils import accuracy
+# from timm.utils import accuracy
 from typing import Iterable, Optional
 import utils
 import utils.misc as misc
@@ -16,9 +15,6 @@ from sklearn.metrics import roc_auc_score
 from pycm import *
 import matplotlib.pyplot as plt
 import numpy as np
-from pathlib import Path
-from multimae.input_adapters import PatchedInputAdapter
-from functools import partial
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -39,7 +35,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     if log_writer is not None and args.log_tensorboard:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    for data_iter_step, (samples, targets, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
@@ -111,7 +107,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, task, epoch, mode, num_class, args, save_confusion_matrix=False, save_heatmap=False):
+def evaluate(data_loader, model, device, task, epoch, mode, num_class, args, save_confusion_matrix=False):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -127,12 +123,9 @@ def evaluate(data_loader, model, device, task, epoch, mode, num_class, args, sav
     
     # switch to evaluation mode
     model.eval()
-    image_name_list = []
     for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0]
         target = batch[1]
-        image_name = batch[2]
-        image_name_list.append(image_name)
 
         tasks_dict = {
             task: tensor.to(device, non_blocking=True)
@@ -160,7 +153,7 @@ def evaluate(data_loader, model, device, task, epoch, mode, num_class, args, sav
             true_label_onehot_list.extend(true_label.cpu().detach().numpy())
             prediction_list.extend(prediction_softmax.cpu().detach().numpy())
 
-        acc1, _ = accuracy(output, target, topk=(1, 2))
+        # acc1, _ = accuracy(output, target, topk=(1, 2))
         metric_logger.update(loss=loss.item())
 
     true_label_decode_list = np.array(true_label_decode_list)
@@ -177,7 +170,7 @@ def evaluate(data_loader, model, device, task, epoch, mode, num_class, args, sav
     if save_confusion_matrix:
         cm = ConfusionMatrix(actual_vector=true_label_decode_list, predict_vector=prediction_decode_list)
         cm.plot(cmap=plt.cm.Blues,number_label=True,normalized=True,plot_lib="matplotlib")
-        plt.savefig(os.path.join(task, f'confusion_matrix_{mode}_normalized.jpg'), dpi=600, bbox_inches='tight')
+        plt.savefig(os.path.join(task, f'confusion_matrix_{mode}.jpg'), dpi=600, bbox_inches='tight')
 
     metric_dict = {'epoch': epoch,'AUROC': auc_roc}
 
